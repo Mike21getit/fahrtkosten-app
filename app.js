@@ -10,7 +10,6 @@ const tx=(s,m,f)=>new Promise((ok,er)=>{const t=db.transaction(s,m),q=f(t.object
 const all=s=>tx(s,'readonly',o=>o.getAll()),put=(s,v)=>tx(s,'readwrite',o=>o.put(v)),del=(s,id)=>tx(s,'readwrite',o=>o.delete(id)),clr=s=>tx(s,'readwrite',o=>o.clear());
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const vmaVal=v=>({'8h':S.vma8,'anab':S.vmaAnAb,'24h':S.vma24}[v]||0);
-const fBetrag=f=>f.km*(f.hinrueck?2:1)*S.kmRate;
 const vat=s=>{const b=num(s.brutto),n=b/(1+s.ust/100);return{netto:n,ust:b-n}};
 const deduct=s=>s.kat==='Bewirtung'?num(s.brutto)*0.7:num(s.brutto);
 const DISC='<p class="hint">Hinweis: Keine Steuerberatung. Pauschalen/Sätze Stand 2026 (Kilometerpauschale 0,30 €/km, Verpflegungsmehraufwand 14 €/28 €) – bitte mit Steuerberater:in prüfen. Bewirtung: nur 70 % als Betriebsausgabe abziehbar; Vorsteuer i. d. R. voll.</p>';
@@ -19,15 +18,41 @@ function render(){document.querySelectorAll('nav button').forEach(b=>b.classList
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{tab=b.dataset.t;render();scrollTo(0,0)});
 function fileToJpeg(file){return new Promise((ok,er)=>{const img=new Image();img.onload=()=>{const m=1400,k=Math.min(1,m/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=img.width*k;c.height=img.height*k;c.getContext('2d').drawImage(img,0,0,c.width,c.height);c.toBlob(b=>{URL.revokeObjectURL(img.src);ok(b)},'image/jpeg',0.7)};img.onerror=er;img.src=URL.createObjectURL(file)})}
 const V={};
-V.fahrten=async()=>{const L=(await all('fahrten')).sort((a,b)=>b.datum.localeCompare(a.datum));
-$('#v').innerHTML=`<div class="card"><b>Neue Fahrt</b><form id="f"><div class="row"><div><label>Datum</label><input type="date" name="datum" value="${today()}" required></div><div><label>km (einfach)</label><input name="km" inputmode="decimal" required></div></div>
-<label>Start</label><input name="start"><label>Ziel</label><input name="ziel"><label>Zweck / Kunde</label><input name="zweck">
-<label class="chk"><input type="checkbox" name="hinrueck" checked> Hin- und Rückfahrt (km ×2)</label><label>Fahrzeug (Notiz)</label><input name="fz" value="${esc(localStorage.lastFz||'')}">
-<label>Verpflegungsmehraufwand</label><select name="vma"><option value="">keiner</option><option value="8h">&gt;8 h abwesend (${eur(S.vma8)})</option><option value="anab">An-/Abreisetag (${eur(S.vmaAnAb)})</option><option value="24h">24 h abwesend (${eur(S.vma24)})</option></select>
-<p class="sm" id="pv"></p><button>Speichern</button></form></div>
-<div class="card"><b>Fahrten (${L.length})</b>${L.map(f=>`<div class="item"><div><b>${fd(f.datum)}</b> ${esc(f.start)} → ${esc(f.ziel)}<div class="sm">${esc(f.zweck)} · ${f.km} km${f.hinrueck?' ×2':''}${f.fz?' · '+esc(f.fz):''}${f.vma?' · VMA '+eur(vmaVal(f.vma)):''}</div></div><div><div class="amt">${eur(fBetrag(f)+vmaVal(f.vma))}</div><button class="del" data-id="${f.id}">Löschen</button></div></div>`).join('')||'<p class="sm">Noch keine Fahrten.</p>'}</div>`;
-const fm=$('#f'),pv=()=>{const km=num(fm.km.value)*(fm.hinrueck.checked?2:1);$('#pv').textContent=`${km} km × ${eur(S.kmRate)} = ${eur(km*S.kmRate)}`+(fm.vma.value?` + VMA ${eur(vmaVal(fm.vma.value))}`:'')};fm.oninput=pv;pv();
-fm.onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(fm));localStorage.lastFz=d.fz;await put('fahrten',{id:uid(),datum:d.datum,start:d.start,ziel:d.ziel,zweck:d.zweck,km:num(d.km),hinrueck:fm.hinrueck.checked,fz:d.fz,vma:d.vma});render()};
+const isTour=f=>f.typ==='tour';
+const kmT=f=>isTour(f)?num(f.km):num(f.km)*(f.hinrueck?2:1);
+const route=f=>isTour(f)?[f.start,...(f.stops||[]).map(s=>s.ort)].concat(f.rueck?[f.start]:[]).map(x=>x||'?').join(' → '):`${f.start||''} → ${f.ziel||''}${f.hinrueck?' → '+(f.start||''):''}`;
+const zwecke=f=>isTour(f)?(f.stops||[]).map(s=>s.zweck).filter(Boolean).join('; '):(f.zweck||'');
+const legTxt=f=>{if(!isTour(f))return f.hinrueck?`${f.km} km einfach ×2 (Altdaten H+R)`:'';if(f.odo)return `Tacho ${f.odo.von} – ${f.odo.bis}`;const p=[f.start,...f.stops.map(s=>s.ort)].concat(f.rueck?[f.start]:[]);return f.legs.map((k,i)=>`${p[i]||'?'}→${p[i+1]||'?'}: ${String(k).replace('.',',')} km`).join(' | ')};
+const fBetrag=f=>kmT(f)*S.kmRate;
+let TD=null;const newTD=()=>({datum:today(),start:localStorage.lastStart||'',stops:[{ort:'',zweck:'',km:''}],rueck:true,rkm:'',odoMode:false,ov:'',ob:'',fz:localStorage.lastFz||'',vma:''});
+function tdKm(){if(TD.odoMode)return Math.max(0,num(TD.ob)-num(TD.ov));return TD.stops.reduce((a,s)=>a+num(s.km),0)+(TD.rueck?num(TD.rkm):0)}
+V.fahrten=async()=>{if(!TD)TD=newTD();const L=(await all('fahrten')).sort((a,b)=>b.datum.localeCompare(a.datum));
+const prev=i=>i===0?(TD.start||'Start'):(TD.stops[i-1].ort||`Stopp ${i}`);
+$('#v').innerHTML=`<div class="card"><b>Neue Tagestour</b><form id="f"><div class="row"><div><label>Datum</label><input type="date" name="datum" value="${TD.datum}" required></div><div><label>Start (Ort)</label><input name="start" value="${esc(TD.start)}" placeholder="z. B. Königswinter"></div></div>
+<label class="chk"><input type="checkbox" name="odoMode" ${TD.odoMode?'checked':''}> Stattdessen Tachostand (Anfang/Ende) verwenden</label>
+${TD.odoMode?`<div class="row"><div><label>Tacho Start</label><input name="ov" inputmode="decimal" value="${esc(TD.ov)}"></div><div><label>Tacho Ende</label><input name="ob" inputmode="decimal" value="${esc(TD.ob)}"></div></div>`:''}
+<div id="stops">${TD.stops.map((s,i)=>`<div class="stop"><div class="sh"><b>Stopp ${i+1}</b><span><button type="button" class="mini" data-a="up" data-i="${i}" ${i?'':'disabled'}>▲</button><button type="button" class="mini" data-a="dn" data-i="${i}" ${i<TD.stops.length-1?'':'disabled'}>▼</button><button type="button" class="mini x" data-a="rm" data-i="${i}" ${TD.stops.length>1?'':'disabled'}>✕</button></span></div>
+<div class="row"><div style="flex:2"><label>Ort</label><input data-i="${i}" data-k="ort" value="${esc(s.ort)}"></div>${TD.odoMode?'':`<div><label class="leg">km ${esc(prev(i))} →</label><input data-i="${i}" data-k="km" inputmode="decimal" value="${esc(s.km)}"></div>`}</div>
+<label>Zweck / Kunde (optional)</label><input data-i="${i}" data-k="zweck" value="${esc(s.zweck)}"></div>`).join('')}</div>
+<button type="button" class="sec" id="add">+ Stopp hinzufügen</button>
+<label class="chk"><input type="checkbox" name="rueck" ${TD.rueck?'checked':''}> Rückfahrt zum Start</label>
+${TD.rueck&&!TD.odoMode?`<label>km Rückfahrt ${esc(TD.stops.at(-1).ort||'letzter Stopp')} → ${esc(TD.start||'Start')}</label><input name="rkm" inputmode="decimal" value="${esc(TD.rkm)}">`:''}
+<label>Fahrzeug (Notiz)</label><input name="fz" value="${esc(TD.fz)}">
+<label>Verpflegungsmehraufwand (pro Tag)</label><select name="vma"><option value="">keiner</option><option value="8h">&gt;8 h abwesend (${eur(S.vma8)})</option><option value="anab">An-/Abreisetag (${eur(S.vmaAnAb)})</option><option value="24h">24 h abwesend (${eur(S.vma24)})</option></select>
+<p class="sm" id="rt"></p><p class="sm" id="pv"></p><button>Speichern</button></form></div>
+<div class="card"><b>Fahrten (${L.length})</b>${L.map(f=>`<div class="item"><div><b>${fd(f.datum)}</b> ${esc(route(f))}<div class="sm">${esc(zwecke(f))}${zwecke(f)?' · ':''}${String(kmT(f)).replace('.',',')} km${f.hinrueck?' (H+R, Altdaten)':''}${f.fz?' · '+esc(f.fz):''}${f.vma?' · VMA '+eur(vmaVal(f.vma)):''}${isTour(f)?'<br>'+esc(legTxt(f)):''}</div></div><div><div class="amt">${eur(fBetrag(f)+vmaVal(f.vma))}</div><button class="del" data-id="${f.id}">Löschen</button></div></div>`).join('')||'<p class="sm">Noch keine Fahrten.</p>'}</div>`;
+const fm=$('#f');fm.vma.value=TD.vma;
+const pv=()=>{const km=tdKm();$('#rt').textContent='Route: '+route({typ:'tour',start:TD.start,stops:TD.stops,rueck:TD.rueck});$('#pv').textContent=`${String(+km.toFixed(1)).replace('.',',')} km × ${eur(S.kmRate)} = ${eur(km*S.kmRate)}`+(TD.vma?` + VMA ${eur(vmaVal(TD.vma))}`:'')};
+fm.oninput=e=>{const t=e.target;if(t.dataset.k)TD.stops[t.dataset.i][t.dataset.k]=t.value;else if(t.type!=='checkbox')TD[t.name]=t.value;
+document.querySelectorAll('label.leg').forEach((l,i)=>l.textContent=`km ${prev(i)} →`);pv()};
+fm.onchange=e=>{const t=e.target;if(t.type==='checkbox'){TD[t.name]=t.checked;render()}else if(t.tagName==='SELECT'){TD.vma=t.value;pv()}};pv();
+$('#add').onclick=()=>{TD.stops.push({ort:'',zweck:'',km:''});render()};
+document.querySelectorAll('button.mini').forEach(b=>b.onclick=()=>{const i=+b.dataset.i,S2=TD.stops;if(b.dataset.a==='rm')S2.splice(i,1);else{const j=b.dataset.a==='up'?i-1:i+1;[S2[i],S2[j]]=[S2[j],S2[i]]}render()});
+fm.onsubmit=async e=>{e.preventDefault();const stops=TD.stops.filter(s=>s.ort.trim()||num(s.km));if(!stops.length)return alert('Bitte mindestens einen Stopp angeben.');
+if(TD.odoMode&&num(TD.ob)<=num(TD.ov))return alert('Tacho Ende muss größer als Start sein.');
+const km=+tdKm().toFixed(1);if(!km)return alert('Bitte km eingeben.');
+localStorage.lastFz=TD.fz;localStorage.lastStart=TD.start;
+await put('fahrten',{id:uid(),typ:'tour',v:2,datum:TD.datum,start:TD.start,stops:stops.map(s=>({ort:s.ort,zweck:s.zweck})),rueck:TD.rueck,legs:TD.odoMode?[]:stops.map(s=>num(s.km)).concat(TD.rueck?[num(TD.rkm)]:[]),odo:TD.odoMode?{von:num(TD.ov),bis:num(TD.ob)}:null,km,fz:TD.fz,vma:TD.vma,zweck:stops.map(s=>s.zweck).filter(Boolean).join('; ')});TD=null;render()};
 document.querySelectorAll('.del').forEach(b=>b.onclick=async()=>{if(confirm('Fahrt löschen?')){await del('fahrten',b.dataset.id);render()}})};
 V.spesen=async()=>{const L=(await all('spesen')).sort((a,b)=>b.datum.localeCompare(a.datum));
 $('#v').innerHTML=`<div class="card"><b>Neuer Beleg</b><form id="f"><div class="row"><div><label>Datum</label><input type="date" name="datum" value="${today()}" required></div><div><label>Betrag brutto €</label><input name="brutto" inputmode="decimal" required></div></div>
@@ -43,14 +68,14 @@ L.forEach(s=>{if(s.foto){const i=document.querySelector(`img[data-id="${s.id}"]`
 document.querySelectorAll('.del').forEach(b=>b.onclick=async()=>{if(confirm('Beleg löschen?')){await del('spesen',b.dataset.id);render()}})};
 async function sums(from,to){const F=(await all('fahrten')).filter(f=>f.datum>=from&&f.datum<=to),Sp=(await all('spesen')).filter(s=>s.datum>=from&&s.datum<=to);
 const t={'Fahrtkosten':0,'Verpflegungsmehraufwand':0};KAT.forEach(k=>t[k]=0);let km=0,ust=0,abz=0;
-F.forEach(f=>{t.Fahrtkosten+=fBetrag(f);t.Verpflegungsmehraufwand+=vmaVal(f.vma);km+=f.km*(f.hinrueck?2:1)});
+F.forEach(f=>{t.Fahrtkosten+=fBetrag(f);t.Verpflegungsmehraufwand+=vmaVal(f.vma);km+=kmT(f)});
 Sp.forEach(s=>{t[s.kat]+=num(s.brutto);ust+=vat(s).ust;abz+=deduct(s)-num(s.brutto)});
 const g=Object.values(t).reduce((a,b)=>a+b,0);return{F,Sp,t,km,ust,g,abz:g+abz}}
 function range(p,y,m){return p==='m'?[`${y}-${m}-01`,`${y}-${m}-31`]:[`${y}-01-01`,`${y}-12-31`]}
 V.uebersicht=async()=>{const n=new Date(),y=sessionStorage.y||n.getFullYear(),m=sessionStorage.m||String(n.getMonth()+1).padStart(2,'0'),p=sessionStorage.p||'m';
 const r=await sums(...range(p,y,m));
 $('#v').innerHTML=`<div class="card"><div class="row"><select id="p"><option value="m">Monat</option><option value="y">Jahr</option></select><select id="m" ${p==='y'?'disabled':''}>${[...Array(12)].map((_,i)=>{const v=String(i+1).padStart(2,'0');return`<option value="${v}">${new Date(2026,i).toLocaleString('de-DE',{month:'long'})}</option>`}).join('')}</select><input id="y" type="number" value="${y}"></div></div>
-<div class="card"><div class="sm">Summe (brutto)</div><div class="tot">${eur(r.g)}</div><div class="sm">${r.F.length} Fahrten · ${r.km} km · ${r.Sp.length} Belege · enth. USt ${eur(r.ust)}<br>Abziehbar (Bewirtung 70 %): ${eur(r.abz)}</div></div>
+<div class="card"><div class="sm">Summe (brutto)</div><div class="tot">${eur(r.g)}</div><div class="sm">${r.F.length} Fahrten · ${String(+r.km.toFixed(1)).replace('.',',')} km · ${r.Sp.length} Belege · enth. USt ${eur(r.ust)}<br>Abziehbar (Bewirtung 70 %): ${eur(r.abz)}</div></div>
 <div class="card"><table>${Object.entries(r.t).map(([k,v])=>`<tr><td>${k}</td><td class="r">${eur(v)}</td></tr>`).join('')}</table></div>${DISC}`;
 $('#p').value=p;$('#m').value=m;$('#p').onchange=e=>{sessionStorage.p=e.target.value;render()};$('#m').onchange=e=>{sessionStorage.m=e.target.value;render()};$('#y').onchange=e=>{sessionStorage.y=e.target.value;render()}};
 function dl(name,data,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}
@@ -61,17 +86,17 @@ $('#v').innerHTML=`<div class="card"><b>Zeitraum</b><div class="row"><div><label
 <div class="card"><b>Datensicherung</b><br><button id="bk">JSON-Backup herunterladen</button><label>Backup wiederherstellen (ersetzt alle Daten)</label><input type="file" id="rs" accept="application/json,.json"></div>${DISC}`;
 const per=()=>[$('#von').value,$('#bis').value];
 $('#csv').onclick=async()=>{const r=await sums(...per()),q=v=>'"'+String(v??'').replace(/"/g,'""')+'"',d=n=>(+n).toFixed(2).replace('.',',');
-const rows=[['Typ','Datum','Kategorie','Beschreibung/Zweck','Start','Ziel','km','Brutto','USt-Satz','Netto','USt','Abziehbar','Anlass','Teilnehmer','Fahrzeug']];
-r.F.sort((a,b)=>a.datum.localeCompare(b.datum)).forEach(f=>{const km=f.km*(f.hinrueck?2:1);rows.push(['Fahrt',fd(f.datum),'Fahrtkosten',f.zweck,f.start,f.ziel,d(km),d(fBetrag(f)),'','','',d(fBetrag(f)),'','',f.fz]);if(f.vma)rows.push(['VMA',fd(f.datum),'Verpflegungsmehraufwand',{'8h':'>8 h','anab':'An-/Abreisetag','24h':'24 h'}[f.vma]+' '+(f.zweck||''),'','','',d(vmaVal(f.vma)),'','','',d(vmaVal(f.vma)),'','',''])});
-r.Sp.sort((a,b)=>a.datum.localeCompare(b.datum)).forEach(s=>{const v=vat(s);rows.push(['Beleg',fd(s.datum),s.kat,s.beschr,'','','',d(s.brutto),s.ust+' %',d(v.netto),d(v.ust),d(deduct(s)),s.anlass,s.teiln,''])});
+const rows=[['Typ','Datum','Kategorie','Beschreibung/Zweck','Route','Ziel','km','Brutto','USt-Satz','Netto','USt','Abziehbar','Anlass','Teilnehmer','Fahrzeug','Etappen']];
+r.F.sort((a,b)=>a.datum.localeCompare(b.datum)).forEach(f=>{rows.push([isTour(f)?'Tagestour':'Fahrt',fd(f.datum),'Fahrtkosten',zwecke(f),route(f),isTour(f)?'':f.ziel,d(kmT(f)),d(fBetrag(f)),'','','',d(fBetrag(f)),'','',f.fz,legTxt(f)]);if(f.vma)rows.push(['VMA',fd(f.datum),'Verpflegungsmehraufwand',{'8h':'>8 h','anab':'An-/Abreisetag','24h':'24 h'}[f.vma]+' '+(zwecke(f)),'','','',d(vmaVal(f.vma)),'','','',d(vmaVal(f.vma)),'','','',''])});
+r.Sp.sort((a,b)=>a.datum.localeCompare(b.datum)).forEach(s=>{const v=vat(s);rows.push(['Beleg',fd(s.datum),s.kat,s.beschr,'','','',d(s.brutto),s.ust+' %',d(v.netto),d(v.ust),d(deduct(s)),s.anlass,s.teiln,'',''])});
 dl(`Fahrtkosten_${per().join('_')}.csv`,'\ufeff'+rows.map(x=>x.map(q).join(';')).join('\r\n'),'text/csv')};
 $('#pr').onclick=async()=>{const [a,b]=per(),r=await sums(a,b);const imgs=await Promise.all(r.Sp.map(async s=>s.foto?b64(s.foto):''));
 $('#print').innerHTML=`<h2>Reisekosten & Spesen ${fd(a)} – ${fd(b)}</h2><p>Michael Falkner · erstellt ${fd(today())} · Kilometersatz ${eur(S.kmRate)}/km</p>
 <h3>Zusammenfassung</h3><table>${Object.entries(r.t).map(([k,v])=>`<tr><td>${k}</td><td class="r">${eur(v)}</td></tr>`).join('')}<tr><th>Summe</th><th class="r">${eur(r.g)}</th></tr><tr><td>davon abziehbar (Bewirtung 70 %)</td><td class="r">${eur(r.abz)}</td></tr><tr><td>enthaltene USt</td><td class="r">${eur(r.ust)}</td></tr></table>
-<h3>Fahrten</h3><table><tr><th>Datum</th><th>Strecke</th><th>Zweck</th><th class="r">km</th><th class="r">Betrag</th><th class="r">VMA</th></tr>${r.F.sort((x,y)=>x.datum.localeCompare(y.datum)).map(f=>`<tr><td>${fd(f.datum)}</td><td>${esc(f.start)} → ${esc(f.ziel)}${f.hinrueck?' (H+R)':''}</td><td>${esc(f.zweck)}</td><td class="r">${f.km*(f.hinrueck?2:1)}</td><td class="r">${eur(fBetrag(f))}</td><td class="r">${f.vma?eur(vmaVal(f.vma)):''}</td></tr>`).join('')}</table>
+<h3>Fahrten</h3><table><tr><th>Datum</th><th>Strecke</th><th>Zweck</th><th class="r">km</th><th class="r">Betrag</th><th class="r">VMA</th></tr>${r.F.sort((x,y)=>x.datum.localeCompare(y.datum)).map(f=>`<tr><td>${fd(f.datum)}</td><td>${esc(route(f))}${f.hinrueck?' (H+R)':''}${isTour(f)?'<br><small>'+esc(legTxt(f))+'</small>':''}</td><td>${esc(zwecke(f))}</td><td class="r">${String(kmT(f)).replace('.',',')}</td><td class="r">${eur(fBetrag(f))}</td><td class="r">${f.vma?eur(vmaVal(f.vma)):''}</td></tr>`).join('')}</table>
 <h3>Belege</h3><table><tr><th>Datum</th><th>Kategorie</th><th>Beschreibung</th><th class="r">Netto</th><th class="r">USt</th><th class="r">Brutto</th></tr>${r.Sp.map(s=>`<tr><td>${fd(s.datum)}</td><td>${s.kat}</td><td>${esc(s.beschr)}${s.anlass?'<br>Anlass: '+esc(s.anlass):''}${s.teiln?'<br>Teilnehmer: '+esc(s.teiln):''}</td><td class="r">${eur(vat(s).netto)}</td><td class="r">${s.ust} % ${eur(vat(s).ust)}</td><td class="r">${eur(s.brutto)}</td></tr>`).join('')}</table>
 ${imgs.some(x=>x)?'<h3>Belegfotos</h3>'+r.Sp.map((s,i)=>imgs[i]?`<div style="page-break-inside:avoid"><p>${fd(s.datum)} ${s.kat} ${eur(s.brutto)}</p><img src="${imgs[i]}" style="max-width:100%;max-height:600px"></div>`:'').join(''):''}${DISC}`;setTimeout(()=>print(),300)};
-$('#bk').onclick=async()=>{const sp=await Promise.all((await all('spesen')).map(async s=>({...s,foto:s.foto?await b64(s.foto):null})));dl(`fahrtkosten-backup-${today()}.json`,JSON.stringify({app:'fahrtkosten',v:1,settings:S,fahrten:await all('fahrten'),spesen:sp}),'application/json')};
+$('#bk').onclick=async()=>{const sp=await Promise.all((await all('spesen')).map(async s=>({...s,foto:s.foto?await b64(s.foto):null})));dl(`fahrtkosten-backup-${today()}.json`,JSON.stringify({app:'fahrtkosten',v:2,settings:S,fahrten:await all('fahrten'),spesen:sp}),'application/json')};
 $('#rs').onchange=async e=>{try{const j=JSON.parse(await e.target.files[0].text());if(j.app!=='fahrtkosten')throw 0;if(!confirm('Alle aktuellen Daten ersetzen?'))return;
 await clr('fahrten');await clr('spesen');for(const f of j.fahrten)await put('fahrten',f);for(const s of j.spesen)await put('spesen',{...s,foto:s.foto?await (await fetch(s.foto)).blob():null});S={...DEF,...j.settings};await put('meta',{id:'settings',v:S});alert('Wiederhergestellt.');render()}catch(x){alert('Ungültige Backup-Datei.')}}};
 V.einst=()=>{$('#v').innerHTML=`<div class="card"><b>Sätze</b><form id="f"><label>Kilometersatz €/km</label><input name="kmRate" inputmode="decimal" value="${String(S.kmRate).replace('.',',')}">
